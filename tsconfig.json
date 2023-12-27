@@ -1,14 +1,12 @@
 {
   "compilerOptions": {
     "module": "commonjs",
-    "target": "es5",
+    "target": "es2020",
     "sourceMap": false,
-    "lib": [
-      "dom",
-      "esnext",
-      "es2015.promise"
-    ]
+    "strict": true,
+    "strictNullChecks": true
   },
+  "include": ["src"],
   "exclude": [
     "node_modules"
   ]

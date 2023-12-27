@@ -1,242 +1,237 @@
-import { PromiseType } from "./data/PromiseType";
-import {getType, isFunction, isNullOrUndefined, isObject, isString} from "./utils";
-
-export default class Promise {
-    private status: PromiseType = PromiseType.PENDING; // 保存当前Promise的状态，初始状态为PENDING
-    private value: any; // 保存供then函数接收的数据
-    private reason: any; // reject状态下返回的原因
-
-    private onFulfilledCallBack: Function[] = []; // 添加到这个Promise的resolved回调
-    private onRejectedCallBack: Function[] = []; // rejected回调
-
-    constructor(asyncFunc: Function) {
-        if(!isFunction(asyncFunc)) {
-            throw new Error('请传入一个函数来初始化Promise');
-        }
-
-        /**
-         *  每个Promise都有一对属于自己的resolve和rejected函数
-         */
-        const resolve = (value: any) => {
-          // then的两个参数需要异步执行
-          // 根据Promise A+标准 使用宏任务和微任务都可以
-          // 此处使用一个比较新的标准queueMicroTask来作为微任务执行，保持和当前浏览器环境一致
-          queueMicrotask(() => {
-              // 此处判断体现了Promise的状态一经改变就不能再变化
-              if(this.status === PromiseType.PENDING) {
-                  this.status = PromiseType.FULFILLED;
-                  this.value = value;
-                  this.onFulfilledCallBack.forEach(callbackFunc => {
-                      callbackFunc(value);
-                  })
-              }
-          })
-        }
-
-        const rejected = (reason: any) => {
-          queueMicrotask(() => {
-              if(this.status === PromiseType.PENDING) {
-                  this.status = PromiseType.REJECTED;
-                  this.reason = reason;
-                  this.onRejectedCallBack.forEach(callbackFunc => {
-                      callbackFunc(reason);
-                  })
-              }
-          })
-        }
-
-        try {
-            asyncFunc(resolve, rejected);
-        } catch (error: unknown) {
-            rejected(error);
-        }
-    }
-
-
-    private static executeThen(resolve, reject, executeFunc, value) {
-        try {
-            const fulFillRet = executeFunc(value);
-            resolve(fulFillRet);
-        } catch (error: unknown) {
-            reject(error);
-        }
-    }
-
-    /**
-     *  1. then函数要返回一个新的Promise，便于链式调用
-     */
-    then(onFulfilled?: Function, onRejected?: Function): Promise {
-        /**
-         * 根据Promise A+ 标准 需要做then-值穿透
-         * 即: 如果没有传入onFulfilled或传入的不是一个函数
-         * 需要自己生成一个函数用于把值传递下去，便于链式调用
-         */
-        if(!isFunction(onFulfilled)) {
-            onFulfilled = (value) => {
-                return value;
-            }
-        }
-        if(!isFunction(onRejected)) {
-            onRejected = (reason) => {
-                // 此处使用throw 而不是return
-                throw reason;
-            }
-        }
-        /**
-         * 根据当前Promise状态来处理then调用
-         */
-        switch (this.status) {
-            case PromiseType.FULFILLED: {
-                return new Promise((resolve, reject) => {
-                    Promise.executeThen(resolve, reject, onFulfilled, this.value);
-                })
-            }
-            case PromiseType.REJECTED: {
-                return new Promise((resolve, reject) => {
-                    Promise.executeThen(resolve, reject, onRejected, this.reason);
-                })
-            }
-            case PromiseType.PENDING: {
-                return new Promise((resolve, reject) => {
-                    this.onFulfilledCallBack.push((value: any) => {
-                        Promise.executeThen(resolve, reject, onFulfilled, value);
-                    });
-                    this.onRejectedCallBack.push((reason: any) => {
-                        Promise.executeThen(resolve, reject, onFulfilled, reason);
-                    })
-                })
-            }
-        }
-    }
-
-
-    /**
-     * catch方法本质上是在调用then方法
-     */
-    catch(onRejected: Function): Promise {
-        return this.then(null, onRejected);
-    }
-
-    finally(finalCallBack: Function): Promise {
-        return this.then((value) => {
-            return Promise.resolve(finalCallBack()).then(() => value);
-        }, (reason) => {
-            return Promise.resolve(finalCallBack()).then(() => { throw reason });
-        })
-    }
-
-    /**
-     * 参数为任何部署了Symbol.iterator的数据结构
-     * 包括但不限于数组、Map、Set、TypedArray
-     * 特殊情况: 字符串 字符串也是一种iterable的数据结构
-     * @param promises
-     */
-    static all(promises: any): Promise {
-        // 1. null or undefined
-        if(isNullOrUndefined(promises)) {
-            throw new TypeError(`请传入一个合法的参数 ${getType(promises)} is not iterable !`)
-        } else if(
-            isObject(promises) &&
-            !(promises[Symbol.iterator] &&
-            isFunction(promises[Symbol.iterator]))
-        ) {
-            // 2. 如果是不合法的对象 抛出错误
-            throw new TypeError(`请传入一个合法的参数 object is not iterable !`);
-        } else if(isString(promises)) {
-            // string直接返回
-            return Promise.resolve([promises]);
-        }
-        const promiseResponse = []; // 保存每个Promise的返回值
-        let resolveCount = 0; // 记录已经Resolve的Promise数量
-        return new Promise((resolve, reject) => {
-            try {
-                for(let i = 0; i < promises.length; i++) {
-                    Promise.resolve(promises[i]).then((resp) => {
-                        // 按顺序保存返回值
-                        promiseResponse[i] = resp;
-                        resolveCount++;
-                        // 如果所有Promise都返回了 则resolve
-                        if(resolveCount === promises.length) {
-                            resolve(promiseResponse);
-                        }
-                    }).catch((reason) => {
-                        // 遇到reject的整个Promise都要reject
-                        reject(reason);
-                    })
-                }
-            } catch (error: unknown) {
-                // 防止对象的iterator函数不是一个合理的迭代器函数
-                if(error instanceof TypeError) {
-                    return Promise.reject('Result of the Symbol.iterator method is not an object')
-                }
-            }
-
-        })
-    }
-
-    static race(promises: any): Promise {
-        // 1. null or undefined
-        if(isNullOrUndefined(promises)) {
-            throw new TypeError(`请传入一个合法的参数 ${getType(promises)} is not iterable !`)
-        } else if(
-            isObject(promises) &&
-            !(promises[Symbol.iterator] &&
-            isFunction(promises[Symbol.iterator]))
-        ) {
-            // 2. 如果是不合法的对象 抛出错误
-            throw new TypeError(`请传入一个合法的参数 object is not iterable !`);
-        } else if(isString(promises)) {
-            // string直接返回
-            return Promise.resolve(promises);
-        }
-        return new Promise((resolve, reject) => {
-            try {
-                for(let i = 0; i < promises.length; i++) {
-                    Promise.resolve(promises[i]).then((resp) => {
-                        resolve(resp);
-                    }).catch((reason) => {
-                        reject(reason);
-                    })
-                }
-            } catch (error: unknown) {
-                // 防止对象的iterator函数不是一个合理的迭代器函数
-                if(error instanceof TypeError) {
-                    return Promise.reject('Result of the Symbol.iterator method is not an object')
-                }
-            }
-
-        })
-    }
-
-    /**
-     * 静态resolve方法 返回一个fulfilled状态的Promise
-     * @param target
-     */
-    static resolve(target?: any): Promise {
-        // 1.情况一 参数是一个Promise对象, 原封不动的返回原对象
-        if(target instanceof Promise) {
-            return target;
-        }
-        // 2.情况二 参数是一个thenable对象
-        if(target.then && isFunction(target.then)) {
-            return new Promise((resolve, reject) => {
-                target.then(resolve, reject);
-            })
-        }
-        // 3.情况三 参数不是thenable对象 或 根本不是对象
-        // 4.情况四 不带有参数
-        return new Promise((resolve) => {
-            resolve(target);
-        })
-    }
-
-    static reject(reason: any): Promise {
-        return new Promise((resolve, reject) => {
-            reject(reason);
-        });
-    }
-
-
-
+enum PromiseStatus {
+  PENDING,
+  FULFILLED,
+  REJECTED,
 }
 
+type resolveFunc<T = any> = (value: T) => void;
+
+type rejectFunc = (reason: any) => void;
+
+export type PromiseCallBack = {
+  resolve: resolveFunc;
+  reject: rejectFunc;
+  onFulfilled: resolveFunc | undefined;
+  onRejected: rejectFunc | undefined;
+};
+
+function isFunction(func: unknown): func is Function {
+  return typeof func === 'function';
+}
+
+const isObject = (value: any): value is Object =>
+  Object.prototype.toString.call(value) === '[object Object]';
+
+const isThenable = (thenable: any): boolean =>
+  (isFunction(thenable) || isObject(thenable)) && 'then' in thenable;
+
+export default class Promise<T = any> {
+  private status: PromiseStatus = PromiseStatus.PENDING;
+
+  // @ts-ignore
+  private value: T;
+
+  private onFulfilledCallBack: Array<PromiseCallBack> = [];
+
+  private onRejectedCallBack: Array<PromiseCallBack> = [];
+
+  constructor(executor: (onFulfill: resolveFunc, onReject: resolveFunc) => void) {
+    const onCurrentPromiseFulfilled = (result: T) => {
+      this.status = PromiseStatus.FULFILLED;
+      this.value = result;
+      queueMicrotask(() => {
+        this.handlePromiseTransition();
+      });
+    };
+
+    const onCurrentPromiseRejected = (result: T) => {
+      this.status = PromiseStatus.REJECTED;
+      this.value = result;
+      queueMicrotask(() => {
+        this.handlePromiseTransition();
+      });
+    };
+
+    let stateTransitioned = false;
+
+    const resolve = (value: T) => {
+      if (stateTransitioned) {
+        return;
+      }
+      stateTransitioned = true;
+      // resolve的情况 要进行解析
+      Promise.tryPromiseResolutionProcedure(
+        value,
+        this,
+        onCurrentPromiseFulfilled,
+        onCurrentPromiseRejected,
+      );
+    };
+
+    const reject = (value: T) => {
+      if (stateTransitioned) {
+        return;
+      }
+      stateTransitioned = true;
+      onCurrentPromiseRejected(value);
+    };
+
+    try {
+      executor(resolve, reject);
+    } catch (error: any) {
+      reject(error);
+    }
+  }
+
+  private handleSinglePromiseTransition(status: PromiseStatus, callback: PromiseCallBack) {
+    const { resolve, reject, onFulfilled, onRejected } = callback;
+    if (status === PromiseStatus.FULFILLED) {
+      try {
+        // 2.2.7.1 如果onFulfilled不是函数，那么promise2必须以promise1的value被fulfilled
+        // 2.2.7.2 如果onRejected不是函数，那么promise2必须以promise1的reason被rejected
+        isFunction(onFulfilled) ? resolve(onFulfilled(this.value)) : resolve(this.value);
+      } catch (error: unknown) {
+        reject(error);
+      }
+    } else {
+      try {
+        isFunction(onRejected) ? resolve(onRejected(this.value)) : reject(this.value);
+      } catch (error: unknown) {
+        reject(error);
+      }
+    }
+  }
+
+  private handlePromiseTransition() {
+    if (this.status === PromiseStatus.FULFILLED) {
+      this.onFulfilledCallBack.forEach((callback) => {
+        this.handleSinglePromiseTransition(PromiseStatus.FULFILLED, callback);
+      });
+      this.onFulfilledCallBack = [];
+    } else if (this.status === PromiseStatus.REJECTED) {
+      this.onRejectedCallBack.forEach((callback) => {
+        this.handleSinglePromiseTransition(PromiseStatus.REJECTED, callback);
+      });
+      this.onRejectedCallBack = [];
+    }
+  }
+
+  private static tryPromiseResolutionProcedure(
+    thenReturn: any,
+    thenPromise: Promise,
+    resolve: resolveFunc,
+    reject: resolveFunc,
+  ) {
+    if (thenReturn === thenPromise) {
+      reject(new TypeError('can not return self in promise.then'));
+      return;
+    }
+    if (thenReturn instanceof Promise) {
+      thenReturn.then(resolve, reject);
+      return;
+    }
+    if (isThenable(thenReturn)) {
+      // let pending = true;
+      try {
+        // 只能读一次
+        const then = thenReturn.then;
+        if (isFunction(then)) {
+          // TODO why?
+          // then.call(
+          //   thenReturn,
+          //   (result: any) => {
+          //     if (pending) {
+          //       pending = false;
+          //       resolve(result);
+          //     }
+          //   },
+          //   (reason: any) => {
+          //     if (pending) {
+          //       pending = false;
+          //       reject(reason);
+          //     }
+          //   },
+          // );
+          // queueMicrotask(() => {
+          //   if (pending) resolve(thenReturn);
+          // });
+          // return;
+          return new Promise(then.bind(thenReturn)).then(resolve, reject);
+        }
+      } catch (e) {
+        // if (!pending) return;
+        reject(e);
+        return;
+      }
+    }
+
+    resolve(thenReturn);
+  }
+
+  then(onFulfilled?: resolveFunc, onRejected?: resolveFunc): Promise {
+    return new Promise((resolve, reject) => {
+      const callback = {
+        resolve,
+        reject,
+        onFulfilled,
+        onRejected,
+      };
+      if (this.status !== PromiseStatus.PENDING) {
+        queueMicrotask(() => {
+          this.handleSinglePromiseTransition(this.status, callback);
+        });
+      } else {
+        this.onFulfilledCallBack.push(callback);
+        this.onRejectedCallBack.push(callback);
+      }
+    });
+  }
+
+  /**
+   * catch方法本质上是在调用then方法
+   */
+  catch(onRejected: resolveFunc): Promise {
+    return this.then(undefined, onRejected);
+  }
+
+  finally(finalCallBack: Function): Promise {
+    return this.then(
+      (value) => {
+        return Promise.resolve(finalCallBack()).then(() => value);
+      },
+      (reason) => {
+        return Promise.resolve(finalCallBack()).then(() => {
+          throw reason;
+        });
+      },
+    );
+  }
+
+  /**
+   * 静态resolve方法 返回一个fulfilled状态的Promise
+   * @param target
+   */
+  static resolve(target?: unknown): Promise {
+    // 1.情况一 参数是一个Promise对象, 原封不动的返回原对象
+    if (target instanceof Promise) {
+      return target;
+    }
+    // 2.情况二 参数是一个thenable对象
+    if (typeof target === 'object' && isFunction((target as any).then)) {
+      return new Promise((resolve, reject) => {
+        (target as any).then(resolve, reject);
+      });
+    }
+    // 3.情况三 参数不是thenable对象 或 根本不是对象
+    // 4.情况四 不带有参数
+    return new Promise((resolve) => {
+      resolve(target);
+    });
+  }
+
+  static reject(reason: any): Promise {
+    return new Promise((resolve, reject) => {
+      reject(reason);
+    });
+  }
+}
